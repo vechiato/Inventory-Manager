@@ -1,10 +1,15 @@
+# routes.py
+
 from flask import  render_template,url_for,redirect,flash,request,jsonify
 from flaskinventory import app,db
 from flaskinventory.forms import addproduct,addlocation,moveproduct,editproduct,editlocation
 from flaskinventory.models import Location,Product,Movement,Balance
 import time,datetime
 from sqlalchemy.exc import IntegrityError
+import logging
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 
 @app.route("/Overview")
 @app.route("/")
@@ -58,8 +63,6 @@ def product():
     return render_template('product.html',title = 'Products',eform=eform,form = form,details=details)
 
 
-
-
 @app.route("/Location", methods = ['GET', 'POST'])
 def loc():
     form = addlocation()
@@ -98,106 +101,100 @@ def loc():
             return redirect('/Location')
     return render_template('loc.html',title = 'Locations',lform=lform,form = form,details=details)
 
-
-
 @app.route("/Transfers", methods = ['GET', 'POST'])
 def move():
     form = moveproduct()
+    # Retrieve all products and locations from the database
+    products = Product.query.all()
+    locations = Location.query.all()
 
     details = Movement.query.all()
-    pdetails = Product.query.all()
     exists = bool(Movement.query.all())
     if exists== False and request.method == 'GET' :
-            flash(f'Transfer products  to view','info')
+            flash(f'Transfer products to view','info')
     #----------------------------------------------------------
-    prod_choices = Product.query.with_entities(Product.prod_name,Product.prod_name).all()
-    loc_choices = Location.query.with_entities(Location.loc_name,Location.loc_name).all()
-    prod_list_names = []
-    src_list_names,dest_list_names=[('Warehouse','Warehouse')],[('Warehouse','Warehouse')]
-    prod_list_names+=prod_choices
-    src_list_names+=loc_choices
-    dest_list_names+=loc_choices
-    #passing list_names to the form for select field
-    form.mprodname.choices = prod_list_names
+    # Build choices for product names
+    prod_choices = [(product.prod_name, product.prod_name) for product in products]
+
+    # Build choices for source and destination locations, including 'Warehouse' as default
+    warehouse_choice = [('Warehouse', 'Warehouse')]
+    loc_choices = [(location.loc_name, location.loc_name) for location in locations]
+
+    src_list_names = warehouse_choice + loc_choices
+    dest_list_names = warehouse_choice + loc_choices
+
+    # Assign choices to form fields
+    form.mprodname.choices = prod_choices
     form.src.choices = src_list_names
     form.destination.choices = dest_list_names
     #--------------------------------------------------------------
     #send to db
-    if form.validate_on_submit() and request.method == 'POST' :
-
+    if form.validate_on_submit() and request.method == 'POST':
         timestamp = datetime.datetime.now()
-        boolbeans = check(form.src.data,form.destination.data,form.mprodname.data,form.mprodqty.data)
+        boolbeans = check(form.src.data, form.destination.data, form.mprodname.data, form.mprodqty.data)
         if boolbeans == False:
-            flash(f'Retry with lower quantity than source location', 'danger')
+            flash('Retry with lower quantity than source location', 'danger')
         elif boolbeans == 'same':
-            flash(f'Source and destination cannot be the same.', 'danger')
+            flash('Source and destination cannot be the same.', 'danger')
         elif boolbeans == 'no prod':
-            flash(f'Not enough products in this loaction .Please add products', 'danger')
+            flash('Not enough products in this location. Please add products', 'danger')
+        elif boolbeans == 'no such product':
+            flash(f"Product '{form.mprodname.data}' does not exist. Please add it to the database.", 'danger')
         else:
-            mov = Movement(ts=timestamp,frm=form.src.data,to = form.destination.data,
-                           pname=form.mprodname.data,pqty=form.mprodqty.data)
+            mov = Movement(ts=timestamp,
+                        frm=form.src.data,
+                        to=form.destination.data,
+                        pname=form.mprodname.data,
+                        pqty=form.mprodqty.data)
             db.session.add(mov)
             db.session.commit()
-            flash(f'Your  activity has been added!', 'success')
+            flash('Your activity has been added!', 'success')
         return redirect(url_for('move'))
     return render_template('move.html',title = 'Transfers',form = form,details= details)
 
-def check(frm,to,name,qty):
-    if frm == to :
-        a = 'same'
-        return a
-    elif frm =='Warehouse' and to != 'Warehouse':
+def check(frm, to, name, qty):
+    logging.info(f"Checking transfer from '{frm}' to '{to}' for product '{name}' with quantity {qty}")
+    if frm == to:
+        return 'same'
+    elif frm == 'Warehouse' and to != 'Warehouse':
         prodq = Product.query.filter_by(prod_name=name).first()
+        if prodq is None:
+            return 'no such product'
         if prodq.prod_qty >= qty:
-            prodq.prod_qty-= qty
-            bal = Balance.query.filter_by(location=to,product=name).first()
-            a=str(bal)
-            if(a=='None'):
-                new = Balance(product=name,location=to,quantity=qty)
-                db.session.add(new)
+            prodq.prod_qty -= qty
+            bal = Balance.query.filter_by(location=to, product=name).first()
+            if bal is None:
+                new_bal = Balance(product=name, location=to, quantity=qty)
+                db.session.add(new_bal)
             else:
                 bal.quantity += qty
             db.session.commit()
-        else :
+        else:
             return False
     elif to == 'Warehouse' and frm != 'Warehouse':
-        bal = Balance.query.filter_by(location=frm,product=name).first()
-        a=str(bal)
-        if(a=='None'):
+        bal = Balance.query.filter_by(location=frm, product=name).first()
+        if bal is None or bal.quantity < qty:
             return 'no prod'
+        prodq = Product.query.filter_by(prod_name=name).first()
+        if prodq is None:
+            return 'no such product'
+        prodq.prod_qty += qty
+        bal.quantity -= qty
+        db.session.commit()
+    else:
+        bl = Balance.query.filter_by(location=frm, product=name).first()
+        if bl is None or bl.quantity < qty:
+            return 'no prod'
+        bal = Balance.query.filter_by(location=to, product=name).first()
+        if bal is None:
+            new_bal = Balance(product=name, location=to, quantity=qty)
+            db.session.add(new_bal)
         else:
-            if bal.quantity >= qty:
-                prodq = Product.query.filter_by(prod_name=name).first()
-                prodq.prod_qty = prodq.prod_qty + qty
-                bal.quantity -= qty
-                db.session.commit()
-            else :
-                 return False
+            bal.quantity += qty
+        bl.quantity -= qty
+        db.session.commit()
+    return True  # Indicate success
 
-    else: #from='?' and to='?'
-        bl = Balance.query.filter_by(location=frm,product=name).first() #check if from location is in Balance
-        a=str(bl)
-        if(a=='None'):#if not
-            return 'no prod'
-
-        elif (bl.quantity - 100) > qty:
-           #if from qty is sufficiently large, check to  in Balance
-            bal = Balance.query.filter_by(location=to,product=name).first()
-            a = str(bal)
-            if a=='None':
-                #if not add entry
-                new = Balance(product=name,location=to,quantity=qty)
-                db.session.add(new)
-                bl = Balance.query.filter_by(location=frm,product=name).first()
-                bl.quantity -= qty
-                db.session.commit()
-            else:#else add to 'from' qty and minus from 'to' qty
-                    bal.quantity += qty #if yes,add to to qty
-                    bl = Balance.query.filter_by(location=frm,product=name).first()
-                    bl.quantity -= qty
-                    db.session.commit()
-        else  :
-                 return False
 @app.route("/delete")
 def delete():
     type = request.args.get('type')
@@ -205,13 +202,13 @@ def delete():
         pid = request.args.get('p_id')
         product = Product.query.filter_by(prod_id=pid).delete()
         db.session.commit()
-        flash(f'Your product  has been deleted!', 'success')
+        flash(f'Your product has been deleted!', 'success')
         return redirect(url_for('product'))
         return render_template('product.html',title = 'Products')
     else:
         pid = request.args.get('p_id')
         loc = Location.query.filter_by(loc_id = pid).delete()
         db.session.commit()
-        flash(f'Your location  has been deleted!', 'success')
+        flash(f'Your location has been deleted!', 'success')
         return redirect(url_for('loc'))
         return render_template('loc.html',title = 'Locations')
