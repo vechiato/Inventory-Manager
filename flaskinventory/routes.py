@@ -194,21 +194,51 @@ def check(frm, to, name, qty):
         bl.quantity -= qty
         db.session.commit()
     return True  # Indicate success
-
+    
 @app.route("/delete")
 def delete():
     type = request.args.get('type')
-    if type == 'product':
+    if type == 'location':
         pid = request.args.get('p_id')
-        product = Product.query.filter_by(prod_id=pid).delete()
-        db.session.commit()
-        flash(f'Your product has been deleted!', 'success')
-        return redirect(url_for('product'))
-        return render_template('product.html',title = 'Products')
-    else:
-        pid = request.args.get('p_id')
-        loc = Location.query.filter_by(loc_id = pid).delete()
-        db.session.commit()
-        flash(f'Your location has been deleted!', 'success')
+        location = Location.query.filter_by(loc_id=pid).first()
+        if location:
+            # Check for associated balances
+            balance_count = Balance.query.filter_by(location=location.loc_name).count()
+            # Check for associated movements
+            movement_count = Movement.query.filter(
+                (Movement.frm == location.loc_name) | (Movement.to == location.loc_name)
+            ).count()
+            if balance_count > 0 or movement_count > 0:
+                flash(
+                    'Cannot delete location because it has associated balances or movements.',
+                    'danger'
+                )
+                return redirect(url_for('loc'))
+            else:
+                db.session.delete(location)
+                db.session.commit()
+                flash('Your location has been deleted!', 'success')
+        else:
+            flash('Location not found.', 'danger')
         return redirect(url_for('loc'))
-        return render_template('loc.html',title = 'Locations')
+    elif type == 'product':
+        pid = request.args.get('p_id')
+        product = Product.query.filter_by(prod_id=pid).first()
+        if product:
+            # Check for associated balances
+            balance_count = Balance.query.filter_by(product=product.prod_name).count()
+            # Check for associated movements
+            movement_count = Movement.query.filter_by(pname=product.prod_name).count()
+            if balance_count > 0 or movement_count > 0:
+                flash(
+                    'Cannot delete product because it has associated balances or movements.',
+                    'danger'
+                )
+                return redirect(url_for('product'))
+            else:
+                db.session.delete(product)
+                db.session.commit()
+                flash('Your product has been deleted!', 'success')
+        else:
+            flash('Product not found.', 'danger')
+        return redirect(url_for('product'))
